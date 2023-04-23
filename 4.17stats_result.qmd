@@ -1,0 +1,230 @@
+---
+title: "日本の鉄道パネルデータのSFA分析"
+author: "Hiroshi Ito"
+format: html
+date: "4/17/2023"
+bibliography: references.bib
+---
+
+# サンプルデータ
+
+## 鉄道統計年報
+
+-   2012年度から2019年度までの鉄道統計年報のデータを使用する（HPでダウンロード可能な形式で公開されている期間）
+
+-   鉄道統計年報掲載の第1種鉄道事業者（路線設備を持ち営業を行なっている事業者）のうち、路線長4km以上の旅客鉄道事業者を対象とする。
+
+-   2019年度は158事業者
+
+## 日本の旅客鉄道会社の形態について
+
+| 経営形態/社会的環境・機能 | 全国都市間 | 大都市圏（外縁部含む）        | 地方                      |
+|:-----------------|:-----------------|:------------------|:-----------------|
+| 民営                      | JR6社      | 大手私鉄　　　　　　          | 地域鉄道　　              |
+| 3セク　　　　　　         |            | 都市3セク、モノレール・新交通 | 国鉄転換3セク、並行在来線 |
+| 公営                      |            | 地下鉄 　　                   | 路面                      |
+
+*1国土交通省の統計、民営鉄道協会の分類では、東京メトロは大手私鉄16社に分類されるが、株主は国(53.42%)と東京都(46.58%)であり、経営形態の実態は「公営」と言える。* 2中小民鉄には国鉄、JRからの転換以外の、民間鉄道撤退後の3セク会社も含まれる（例：万葉線、えちぜん鉄道など）
+
+## 生産技術と社会的役割、環境に着目した分類
+
+|     | カテゴリ名                  |
+|----:|:----------------------------|
+|   1 | JR6社                       |
+|   2 | 大手私鉄(1)　　　　　　　　 |
+|   3 | 都市3セク                   |
+|   4 | 地下鉄                      |
+|   5 | モノレール・新交通          |
+|   6 | 地域鉄道                    |
+|   7 | 並行在来線                  |
+|   8 | 転換3セク                   |
+|   9 | 路面                        |
+
+（1)東京メトロは本稿では「地下鉄」に含める
+
+## サンプルの記述統計
+
+```{r include=FALSE}
+pacman::p_load(tidyverse, 
+               plm,          # Panel data analysis package
+               frontier,     # SFA analysis package
+               janitor,      # 表に合計値とパーセンテージを追加
+               openxlsx,     # エクセルの書き出しを行う
+               crosstable,    # グループごとの要約統計表の作成
+               gt,           # 作表
+               rstatix,      # 要約統計量と統計的検定
+               gtsummary,    # 要約統計量と検定
+               stargazer,
+               editData
+               )
+```
+
+```{r include=FALSE}
+setwd("/Users/HiroshiIto/Documents/Rworkspace/SFA_Production_func")
+df <- read_csv("paneldata2012_2019_realGDP2.csv") 
+```
+
+```{r}
+df |> 
+  select(category, pass_kiro, employees, cars, rail_length, stations) |>
+  tbl_summary(by=category,
+              statistic = list (
+                all_continuous() ~ "({min}, {mean}, {max})"
+                )
+              )
+
+```
+
+## Partial Factor Productivity(偏要素生産性)の可視化(2019年のデータから)
+
+![アウトプットに対する各生産要素プロット（両対数軸）](output_input_plot.png){alt="アウトプットに対する各生産要素プロット"}
+
+## "capital-labor ratio"($K/L$)としての、カテゴリ別社員一人当たり路線長
+
+![カテゴリ別社員一人当たり路線長](r_r_lngth_empys_ratio.png)
+
+# Stochastic Frontier Analysis
+
+## Pooled SFAの推定結果
+
+```{r, include=FALSE}
+str(df)
+```
+
+```{r}
+simpleSFA <- sfa(log(pass_kiro) ~  log(employees) + log(cars) + log(stations) + log(rail_length), 
+                data = df, truncNorm = TRUE) 
+summary(simpleSFA)
+```
+
+------------------------------------------------------------------------
+
+## SFAモデルのパラメータとOLSのパラメータとの比較
+
+-   路線長の説明力が低い。
+-   駅数の符号がマイナスである。新設は非常に難しいが、廃止は容易にできるためと思われる。
+
+```{r}
+df_olscoef <- coef(summary(simpleSFA), which = "ols" )  |> data.frame() |> print()
+df_sfacoef <- coef(summary(simpleSFA), which = "mle" ) |> data.frame() |> print()
+```
+
+------------------------------------------------------------------------
+
+OLSとSFAのモデル選択のための尤度比検定（LRテスト）を行ったところ、gammaがゼロという帰無仮説が棄却されるため、SFAモデルが選択される。
+
+```{r}
+lrtest(simpleSFA)
+```
+
+### 技術効率性(TE)の分析
+
+```{r}
+eff <- efficiencies(simpleSFA, asInData = TRUE ) 
+summary(eff)
+```
+
+```{r, echo=FALSE}
+hist(eff)
+```
+
+```{r, include=FALSE}
+## efficiencyの値のデータフレーム化
+
+df_eff <- data.frame(eff)
+```
+
+```{r, include=FALSE}
+## 鉄道会社名、カテゴリ、路線長のデータを結合
+
+df_eff_rank <- cbind(df$name, eff, df$category, df$rail_length) |> 
+  data.frame() 
+```
+
+```{r, include=FALSE}
+## 変数名の変更と数値のデータ型の変更
+
+df_eff_rank <- df_eff_rank |> 
+  rename( name = V1, category = V3, rail_length = V4) |> 
+  mutate(eff = as.numeric(eff)) |> 
+  mutate(rail_length = as.numeric(rail_length)) 
+write.csv(df_eff_rank, file="df_eff_rank.csv")
+```
+
+```{r, echo=FALSE}
+df_eff_rank |> select(eff, category) |> 
+  tbl_summary(by=category,               
+              statistic = list (
+                all_continuous() ~ "({min}, {mean}, {max})"
+                )
+              )
+```
+
+## パネルデータとしての推論
+
+```{r, include=FALSE}
+# パネルデータ分析用のデータ作成
+# "sfadata"のname, year_dumを先頭列へ移動
+pdata2012_2019 <-  dplyr:::select.data.frame(df, name, year_dum, everything())
+#事業者名を正数コード化
+pdata2012_2019$name <- as.integer(as.factor(pdata2012_2019$name))　
+str(pdata2012_2019)
+
+# パネルデータとして指定
+pdata2012_2019sfa <- pdata.frame( pdata2012_2019, c( "name", "year_dum"))
+```
+
+## Panel SFA
+
+### 時間効果の確認
+
+時間経過による効率性改善効果は認められれない。
+
+```{r}
+pnlSFA_var <- sfa(log(pass_kiro) ~  log(employees) + log(cars) + log(stations) + log(rail_length), 
+                data = pdata2012_2019sfa, truncNorm = TRUE, timeEffect = TRUE) 
+summary(pnlSFA_var)
+```
+
+### 技術効率性(TE)の分析
+
+```{r}
+pnleff <- efficiencies(pnlSFA_var, asInData = TRUE ) 
+summary(pnleff)
+```
+
+```{r, echo=FALSE}
+hist(pnleff)
+```
+
+```{r, include=FALSE}
+## efficiencyの値のデータフレーム化
+
+df_eff <- data.frame(pnleff) |> print()
+```
+
+```{r, include=FALSE}
+## 鉄道会社名、カテゴリ、路線長のデータを結合
+
+df_pnleff_rank <- cbind(pdata2012_2019sfa$name, eff, pdata2012_2019sfa$category, pdata2012_2019sfa$rail_length) |> 
+  data.frame() 
+```
+
+```{r, include=FALSE}
+## 変数名の変更と数値のデータ型の変更
+
+df_pnleff_rank <- df_pnleff_rank |> 
+  rename( name = V1, category = V3, rail_length = V4) |> 
+  mutate(eff = as.numeric(eff)) |> 
+  mutate(rail_length = as.numeric(rail_length)) 
+write.csv(df_pnleff_rank, file="df_pnleff_rank.csv")
+```
+
+```{r, echo=FALSE}
+df_pnleff_rank |> select(eff, category) |> 
+  tbl_summary(by=category,               
+              statistic = list (
+                all_continuous() ~ "({min}, {mean}, {max})"
+                )
+              )
+```
